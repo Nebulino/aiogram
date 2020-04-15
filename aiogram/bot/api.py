@@ -24,17 +24,23 @@ def check_token(token: str) -> bool:
     :param token:
     :return:
     """
+    if not isinstance(token, str):
+        message = (f"Token is invalid! "
+                   f"It must be 'str' type instead of {type(token)} type.")
+        raise exceptions.ValidationError(message)
+
     if any(x.isspace() for x in token):
-        raise exceptions.ValidationError('Token is invalid!')
+        message = "Token is invalid! It can't contains spaces."
+        raise exceptions.ValidationError(message)
 
     left, sep, right = token.partition(':')
-    if (not sep) or (not left.isdigit()) or (len(left) < 3):
+    if (not sep) or (not left.isdigit()) or (not right):
         raise exceptions.ValidationError('Token is invalid!')
 
     return True
 
 
-async def check_result(method_name: str, content_type: str, status_code: int, body: str):
+def check_result(method_name: str, content_type: str, status_code: int, body: str):
     """
     Checks whether `result` is a valid API response.
     A result is considered invalid if:
@@ -95,7 +101,7 @@ async def make_request(session, token, method, data=None, files=None, **kwargs):
     req = compose_data(data, files)
     try:
         async with session.post(url, data=req, **kwargs) as response:
-            return await check_result(method, response.content_type, response.status, await response.text())
+            return check_result(method, response.content_type, response.status, await response.text())
     except aiohttp.ClientError as e:
         raise exceptions.NetworkError(f"aiohttp client throws an error: {e.__class__.__name__}: {e}")
 
@@ -147,7 +153,7 @@ class Methods(Helper):
     """
     Helper for Telegram API Methods listed on https://core.telegram.org/bots/api
 
-    List is updated to Bot API 4.1
+    List is updated to Bot API 4.6
     """
     mode = HelperMode.lowerCamelCase
 
@@ -174,6 +180,8 @@ class Methods(Helper):
     STOP_MESSAGE_LIVE_LOCATION = Item()  # stopMessageLiveLocation
     SEND_VENUE = Item()  # sendVenue
     SEND_CONTACT = Item()  # sendContact
+    SEND_POLL = Item()  # sendPoll
+    SEND_DICE = Item()  # sendDice
     SEND_CHAT_ACTION = Item()  # sendChatAction
     GET_USER_PROFILE_PHOTOS = Item()  # getUserProfilePhotos
     GET_FILE = Item()  # getFile
@@ -181,6 +189,8 @@ class Methods(Helper):
     UNBAN_CHAT_MEMBER = Item()  # unbanChatMember
     RESTRICT_CHAT_MEMBER = Item()  # restrictChatMember
     PROMOTE_CHAT_MEMBER = Item()  # promoteChatMember
+    SET_CHAT_ADMINISTRATOR_CUSTOM_TITLE = Item()  # setChatAdministratorCustomTitle
+    SET_CHAT_PERMISSIONS = Item()  # setChatPermissions
     EXPORT_CHAT_INVITE_LINK = Item()  # exportChatInviteLink
     SET_CHAT_PHOTO = Item()  # setChatPhoto
     DELETE_CHAT_PHOTO = Item()  # deleteChatPhoto
@@ -196,12 +206,15 @@ class Methods(Helper):
     SET_CHAT_STICKER_SET = Item()  # setChatStickerSet
     DELETE_CHAT_STICKER_SET = Item()  # deleteChatStickerSet
     ANSWER_CALLBACK_QUERY = Item()  # answerCallbackQuery
+    SET_MY_COMMANDS = Item()  # setMyCommands
+    GET_MY_COMMANDS = Item()  # getMyCommands
 
     # Updating messages
     EDIT_MESSAGE_TEXT = Item()  # editMessageText
     EDIT_MESSAGE_CAPTION = Item()  # editMessageCaption
     EDIT_MESSAGE_MEDIA = Item()  # editMessageMedia
     EDIT_MESSAGE_REPLY_MARKUP = Item()  # editMessageReplyMarkup
+    STOP_POLL = Item()  # stopPoll
     DELETE_MESSAGE = Item()  # deleteMessage
 
     # Stickers
@@ -212,6 +225,7 @@ class Methods(Helper):
     ADD_STICKER_TO_SET = Item()  # addStickerToSet
     SET_STICKER_POSITION_IN_SET = Item()  # setStickerPositionInSet
     DELETE_STICKER_FROM_SET = Item()  # deleteStickerFromSet
+    SET_STICKER_SET_THUMB = Item()  # setStickerSetThumb
 
     # Inline mode
     ANSWER_INLINE_QUERY = Item()  # answerInlineQuery

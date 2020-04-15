@@ -1,28 +1,40 @@
 import asyncio
+import contextlib
 import io
 import ssl
+import typing
+import warnings
+from contextvars import ContextVar
 from typing import Dict, List, Optional, Union
 
 import aiohttp
 import certifi
+from aiohttp.helpers import sentinel
 
 from . import api
 from ..types import ParseMode, base
 from ..utils import json
-from ..utils.auth_widget import check_token
+from ..utils.auth_widget import check_integrity
 
 
 class BaseBot:
     """
     Base class for bot. It's raw bot.
     """
+    _ctx_timeout = ContextVar('TelegramRequestTimeout')
+    _ctx_token = ContextVar('BotDifferentToken')
 
-    def __init__(self, token: base.String,
-                 loop: Optional[Union[asyncio.BaseEventLoop, asyncio.AbstractEventLoop]] = None,
-                 connections_limit: Optional[base.Integer] = None,
-                 proxy: Optional[base.String] = None, proxy_auth: Optional[aiohttp.BasicAuth] = None,
-                 validate_token: Optional[base.Boolean] = True,
-                 parse_mode=None):
+    def __init__(
+            self,
+            token: base.String,
+            loop: Optional[Union[asyncio.BaseEventLoop, asyncio.AbstractEventLoop]] = None,
+            connections_limit: Optional[base.Integer] = None,
+            proxy: Optional[base.String] = None,
+            proxy_auth: Optional[aiohttp.BasicAuth] = None,
+            validate_token: Optional[base.Boolean] = True,
+            parse_mode: typing.Optional[base.String] = None,
+            timeout: typing.Optional[typing.Union[base.Integer, base.Float, aiohttp.ClientTimeout]] = None
+    ):
         """
         Instructions how to get Bot token is found here: https://core.telegram.org/bots#3-how-do-i-create-a-bot
 
@@ -40,11 +52,14 @@ class BaseBot:
         :type validate_token: :obj:`bool`
         :param parse_mode: You can set default parse mode
         :type parse_mode: :obj:`str`
+        :param timeout: Request timeout
+        :type timeout: :obj:`typing.Optional[typing.Union[base.Integer, base.Float, aiohttp.ClientTimeout]]`
         :raise: when token is invalid throw an :obj:`aiogram.utils.exceptions.ValidationError`
         """
         # Authentication
         if validate_token:
             api.check_token(token)
+        self._token = None
         self.__token = token
 
         self.proxy = proxy
@@ -60,9 +75,9 @@ class BaseBot:
 
         if isinstance(proxy, str) and (proxy.startswith('socks5://') or proxy.startswith('socks4://')):
             from aiohttp_socks import SocksConnector
-            from aiohttp_socks.helpers import parse_socks_url
+            from aiohttp_socks.utils import parse_proxy_url
 
-            socks_ver, host, port, username, password = parse_socks_url(proxy)
+            socks_ver, host, port, username, password = parse_proxy_url(proxy)
             if proxy_auth:
                 if not username:
                     username = proxy_auth.login
@@ -72,17 +87,84 @@ class BaseBot:
             connector = SocksConnector(socks_ver=socks_ver, host=host, port=port,
                                        username=username, password=password,
                                        limit=connections_limit, ssl_context=ssl_context,
-                                       loop=self.loop)
+                                       rdns=True, loop=self.loop)
 
             self.proxy = None
             self.proxy_auth = None
         else:
-            connector = aiohttp.TCPConnector(limit=connections_limit, ssl_context=ssl_context,
-                                             loop=self.loop)
+            connector = aiohttp.TCPConnector(limit=connections_limit, ssl=ssl_context, loop=self.loop)
+        self._timeout = None
+        self.timeout = timeout
 
         self.session = aiohttp.ClientSession(connector=connector, loop=self.loop, json_serialize=json.dumps)
 
         self.parse_mode = parse_mode
+
+    def __del__(self):
+        if not hasattr(self, 'loop') or not hasattr(self, 'session'):
+            return
+        if self.loop.is_running():
+            self.loop.create_task(self.close())
+            return
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(self.close())
+
+    @staticmethod
+    def _prepare_timeout(
+            value: typing.Optional[typing.Union[base.Integer, base.Float, aiohttp.ClientTimeout]]
+    ) -> typing.Optional[aiohttp.ClientTimeout]:
+        if value is None or isinstance(value, aiohttp.ClientTimeout):
+            return value
+        return aiohttp.ClientTimeout(total=value)
+
+    @property
+    def timeout(self):
+        timeout = self._ctx_timeout.get(self._timeout)
+        if timeout is None:
+            return sentinel
+        return timeout
+
+    @timeout.setter
+    def timeout(self, value):
+        self._timeout = self._prepare_timeout(value)
+
+    @timeout.deleter
+    def timeout(self):
+        self.timeout = None
+
+    @contextlib.contextmanager
+    def request_timeout(self, timeout: typing.Union[base.Integer, base.Float, aiohttp.ClientTimeout]):
+        """
+        Context manager implements opportunity to change request timeout in current context
+
+        :param timeout: Request timeout
+        :type timeout: :obj:`typing.Optional[typing.Union[base.Integer, base.Float, aiohttp.ClientTimeout]]`
+        :return:
+        """
+        timeout = self._prepare_timeout(timeout)
+        token = self._ctx_timeout.set(timeout)
+        try:
+            yield
+        finally:
+            self._ctx_timeout.reset(token)
+
+    @property
+    def __token(self):
+        return self._ctx_token.get(self._token)
+
+    @__token.setter
+    def __token(self, value):
+        self._token = value
+
+    @contextlib.contextmanager
+    def with_token(self, bot_token: base.String, validate_token: Optional[base.Boolean] = True):
+        if validate_token:
+            api.check_token(bot_token)
+        token = self._ctx_token.set(bot_token)
+        try:
+            yield
+        finally:
+            self._ctx_token.reset(token)
 
     async def close(self):
         """
@@ -109,11 +191,11 @@ class BaseBot:
         :raise: :obj:`aiogram.exceptions.TelegramApiError`
         """
         return await api.make_request(self.session, self.__token, method, data, files,
-                                      proxy=self.proxy, proxy_auth=self.proxy_auth, **kwargs)
+                                      proxy=self.proxy, proxy_auth=self.proxy_auth, timeout=self.timeout, **kwargs)
 
     async def download_file(self, file_path: base.String,
                             destination: Optional[base.InputFile] = None,
-                            timeout: Optional[base.Integer] = 30,
+                            timeout: Optional[base.Integer] = sentinel,
                             chunk_size: Optional[base.Integer] = 65536,
                             seek: Optional[base.Boolean] = True) -> Union[io.BytesIO, io.FileIO]:
         """
@@ -133,7 +215,7 @@ class BaseBot:
         if destination is None:
             destination = io.BytesIO()
 
-        url = api.Methods.file_url(token=self.__token, path=file_path)
+        url = self.get_file_url(file_path)
 
         dest = destination if isinstance(destination, io.IOBase) else open(destination, 'wb')
         async with self.session.get(url, timeout=timeout, proxy=self.proxy, proxy_auth=self.proxy_auth) as response:
@@ -146,6 +228,9 @@ class BaseBot:
         if seek:
             dest.seek(0)
         return dest
+
+    def get_file_url(self, file_path):
+        return api.Methods.file_url(token=self.__token, path=file_path)
 
     async def send_file(self, file_type, method, file, payload) -> Union[Dict, base.Boolean]:
         """
@@ -185,10 +270,14 @@ class BaseBot:
             if value not in ParseMode.all():
                 raise ValueError(f"Parse mode must be one of {ParseMode.all()}")
             setattr(self, '_parse_mode', value)
+            if value == 'markdown':
+                warnings.warn("Parse mode `Markdown` is legacy since Telegram Bot API 4.5, "
+                              "retained for backward compatibility. Use `MarkdownV2` instead.\n"
+                              "https://core.telegram.org/bots/api#markdown-style", stacklevel=3)
 
     @parse_mode.deleter
     def parse_mode(self):
         self.parse_mode = None
 
     def check_auth_widget(self, data):
-        return check_token(data, self.__token)
+        return check_integrity(self.__token, data)
